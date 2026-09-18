@@ -381,7 +381,7 @@ impl ValueParserFactory for OptionalPathBufParser {
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    let args: Vec<_> = args.collect();
+    let args: Vec<_> = uucore::clap_localization::apply_posixly_correct(&uu_app(), args);
     let matches = uu_app().try_get_matches_from(&args).map_err(|e| {
         use clap::error::{ContextKind, ContextValue, ErrorKind};
         use uucore::clap_localization::handle_clap_error_with_exit_code;

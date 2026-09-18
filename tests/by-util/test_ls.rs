@@ -8064,4 +8064,17 @@ ls: invalid --block-size argument '1fb'
             .fails_with_code(2)
             .stderr_is("ls: invalid --block-size argument '1fb'\n");
     }
+
+    #[test]
+    fn test_posixly_correct_options_after_operands() {
+        let (at, mut ucmd) = at_and_ucmd!();
+        at.touch("file");
+
+        ucmd.env("POSIXLY_CORRECT", "1")
+            .arg("file")
+            .arg("-l")
+            .fails_with_code(2)
+            .stdout_contains_line("file")
+            .stderr_contains("ls: cannot access '-l': No such file or directory");
+    }
 }

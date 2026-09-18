@@ -432,6 +432,129 @@ pub fn handle_clap_result_with_diagnostics(
     ))
 }
 
+fn option_takes_value(arg: &clap::Arg) -> bool {
+    if arg.is_positional() {
+        false
+    } else {
+        arg.get_num_args()
+            .map_or_else(|| arg.get_action().takes_values(), |r| r.min_values() > 0)
+    }
+}
+
+fn find_long_opt<'a>(cmd: &'a Command, name: &str) -> Option<&'a clap::Arg> {
+    cmd.get_arguments().find(|arg| {
+        if arg.is_positional() {
+            return false;
+        }
+        if arg.get_long() == Some(name) {
+            return true;
+        }
+        if let Some(aliases) = arg.get_all_aliases()
+            && aliases.contains(&name)
+        {
+            return true;
+        }
+        false
+    })
+}
+
+fn find_short_opt(cmd: &Command, c: char) -> Option<&clap::Arg> {
+    cmd.get_arguments().find(|arg| {
+        if arg.is_positional() {
+            return false;
+        }
+        if arg.get_short() == Some(c) {
+            return true;
+        }
+        if let Some(aliases) = arg.get_all_short_aliases()
+            && aliases.contains(&c)
+        {
+            return true;
+        }
+        false
+    })
+}
+
+pub fn apply_posixly_correct<I, T>(cmd: &Command, itr: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+    if std::env::var_os("POSIXLY_CORRECT").is_none() {
+        return args;
+    }
+    if cmd.get_name() == "join" || cmd.get_name() == "pr" {
+        return args;
+    }
+    if args.len() <= 1 {
+        return args;
+    }
+
+    let mut i = 1;
+    while i < args.len() {
+        let arg_bytes = args[i].as_encoded_bytes();
+        if arg_bytes == b"--" {
+            return args;
+        }
+        if arg_bytes == b"-" {
+            args.insert(i, OsString::from("--"));
+            return args;
+        }
+        if let Some(arg_str) = args[i].to_str() {
+            if let Some(long_part) = arg_str.strip_prefix("--") {
+                if let Some((_, _)) = long_part.split_once('=') {
+                    i += 1;
+                } else if let Some(arg) = find_long_opt(cmd, long_part) {
+                    if option_takes_value(arg) {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            } else if let Some(short_part) = arg_str.strip_prefix('-') {
+                let mut consumed_next = false;
+                let chars: Vec<char> = short_part.chars().collect();
+                for (idx, &c) in chars.iter().enumerate() {
+                    if let Some(arg) = find_short_opt(cmd, c) {
+                        let has_rest = idx + 1 < chars.len();
+                        if option_takes_value(arg) {
+                            if has_rest {
+                                break;
+                            }
+                            consumed_next = true;
+                            break;
+                        } else if arg
+                            .get_num_args()
+                            .is_some_and(|r| r.takes_values() && r.min_values() == 0)
+                            && has_rest
+                        {
+                            break;
+                        }
+                    }
+                }
+                if consumed_next {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else {
+                args.insert(i, OsString::from("--"));
+                return args;
+            }
+        } else if arg_bytes.starts_with(b"-") {
+            i += 1;
+        } else {
+            args.insert(i, OsString::from("--"));
+            return args;
+        }
+    }
+
+    args
+}
+
 /// Handles clap command parsing with a custom exit code for errors.
 ///
 /// Similar to `handle_clap_result` but allows specifying a custom exit code
@@ -473,7 +596,8 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    cmd.try_get_matches_from(itr).map_err(|e| {
+    let args = apply_posixly_correct(&cmd, itr);
+    cmd.try_get_matches_from(args).map_err(|e| {
         if e.exit_code() == 0 {
             e.into() // Preserve help/version
         } else {
@@ -733,6 +857,132 @@ mod tests {
             } else {
                 env::set_var("LANG", original_lang);
             }
+        }
+    }
+
+    #[test]
+    fn test_apply_posixly_correct() {
+        use std::env;
+        let cmd = Command::new("test")
+            .arg(Arg::new("input").short('i').long("input").num_args(1))
+            .arg(
+                Arg::new("flag")
+                    .short('f')
+                    .long("flag")
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(Arg::new("file").num_args(1..));
+
+        unsafe {
+            env::remove_var("POSIXLY_CORRECT");
+        }
+        let args = vec!["test", "operand", "-f"];
+        let result = apply_posixly_correct(&cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("test"),
+                OsString::from("operand"),
+                OsString::from("-f")
+            ]
+        );
+
+        unsafe {
+            env::set_var("POSIXLY_CORRECT", "1");
+        }
+
+        let args = vec!["test", "operand", "-f"];
+        let result = apply_posixly_correct(&cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("test"),
+                OsString::from("--"),
+                OsString::from("operand"),
+                OsString::from("-f")
+            ]
+        );
+
+        let args = vec!["test", "-i", "in.txt", "operand", "-f"];
+        let result = apply_posixly_correct(&cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("test"),
+                OsString::from("-i"),
+                OsString::from("in.txt"),
+                OsString::from("--"),
+                OsString::from("operand"),
+                OsString::from("-f")
+            ]
+        );
+
+        let args = vec!["test", "--input=in.txt", "operand", "-f"];
+        let result = apply_posixly_correct(&cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("test"),
+                OsString::from("--input=in.txt"),
+                OsString::from("--"),
+                OsString::from("operand"),
+                OsString::from("-f")
+            ]
+        );
+
+        let args = vec!["test", "-iin.txt", "operand", "-f"];
+        let result = apply_posixly_correct(&cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("test"),
+                OsString::from("-iin.txt"),
+                OsString::from("--"),
+                OsString::from("operand"),
+                OsString::from("-f")
+            ]
+        );
+
+        let args = vec!["test", "-", "-f"];
+        let result = apply_posixly_correct(&cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("test"),
+                OsString::from("--"),
+                OsString::from("-"),
+                OsString::from("-f")
+            ]
+        );
+
+        let args = vec!["test", "--", "operand", "-f"];
+        let result = apply_posixly_correct(&cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("test"),
+                OsString::from("--"),
+                OsString::from("operand"),
+                OsString::from("-f")
+            ]
+        );
+
+        let join_cmd = Command::new("join").arg(Arg::new("file").num_args(1..));
+        let args = vec!["join", "a", "b", "-a", "1"];
+        let result = apply_posixly_correct(&join_cmd, args);
+        assert_eq!(
+            result,
+            vec![
+                OsString::from("join"),
+                OsString::from("a"),
+                OsString::from("b"),
+                OsString::from("-a"),
+                OsString::from("1")
+            ]
+        );
+
+        unsafe {
+            env::remove_var("POSIXLY_CORRECT");
         }
     }
 }

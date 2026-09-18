@@ -1910,3 +1910,19 @@ fn test_dash_hint_is_shell_escaped() {
         .fails_with_code(1)
         .stderr_contains("./'-a'$'\\t''b'\\''c'' to remove the file '-a'$'\\t''b'\\''c'.");
 }
+
+#[test]
+fn test_posixly_correct_options_after_operands() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("testdir");
+    at.touch("testdir/a");
+
+    ucmd.env("POSIXLY_CORRECT", "1")
+        .arg("testdir")
+        .arg("-rf")
+        .fails_with_code(1)
+        .stderr_contains("cannot remove 'testdir': Is a directory")
+        .stderr_contains("cannot remove '-rf': No such file or directory");
+
+    assert!(at.dir_exists("testdir"));
+}

@@ -697,6 +697,29 @@ fn test_date_stdin_invalid_utf8_line() {
 }
 
 #[test]
+fn test_date_file_batch_dates() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    let file = "batch_dates.txt";
+    at.write(
+        file,
+        "Sat Sep 20 22:11:30 2014\nSat Sep 20 19:14:16 2014\nMon Sep 22 17:42:56 2014\n",
+    );
+    ucmd.args(&["-u", "-f", file, "+%Y-%m-%d %T"])
+        .succeeds()
+        .stdout_only("2014-09-20 22:11:30\n2014-09-20 19:14:16\n2014-09-22 17:42:56\n");
+}
+
+#[test]
+fn test_date_file_special_inputs() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    let file = "special_dates.txt";
+    at.write(file, "2026(comment)-01-05\n\n1234\n");
+    ucmd.args(&["-u", "-f", file, "+%T"])
+        .succeeds()
+        .stdout_contains("00:00:00\n12:34:00\n");
+}
+
+#[test]
 fn test_date_for_file_mtime() {
     use std::time::{Duration, UNIX_EPOCH};
 

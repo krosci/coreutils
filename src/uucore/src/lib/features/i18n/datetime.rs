@@ -67,6 +67,19 @@ pub enum CalendarType {
     Ethiopian,
 }
 
+use std::cell::RefCell;
+
+struct LocaleFormatters {
+    month_long: Option<DateTimeFormatter<fieldsets::M>>,
+    month_medium: Option<DateTimeFormatter<fieldsets::M>>,
+    weekday_long: Option<DateTimeFormatter<fieldsets::E>>,
+    weekday_short: Option<DateTimeFormatter<fieldsets::E>>,
+}
+
+thread_local! {
+    static FORMATTERS: RefCell<Option<LocaleFormatters>> = const { RefCell::new(None) };
+}
+
 /// Transform a strftime format string to use locale-specific calendar values
 pub fn localize_format_string(format: &str, date: JiffDate) -> String {
     const PERCENT_PLACEHOLDER: &str = "\x00\x00";
@@ -113,38 +126,42 @@ pub fn localize_format_string(format: &str, date: JiffDate) -> String {
             .replace("%e", &format!("{cal_day:2}"));
     }
 
-    // Format localized names using ICU DateTimeFormatter
-    let locale_prefs = locale.clone().into();
+    FORMATTERS.with(|f| {
+        let mut borrow = f.borrow_mut();
+        let formatters = borrow.get_or_insert_with(|| {
+            let (locale, _) = get_time_locale();
+            let locale_prefs = locale.clone().into();
+            LocaleFormatters {
+                month_long: DateTimeFormatter::try_new(locale_prefs, fieldsets::M::long()).ok(),
+                month_medium: DateTimeFormatter::try_new(locale_prefs, fieldsets::M::medium()).ok(),
+                weekday_long: DateTimeFormatter::try_new(locale_prefs, fieldsets::E::long()).ok(),
+                weekday_short: DateTimeFormatter::try_new(locale_prefs, fieldsets::E::short()).ok(),
+            }
+        });
 
-    if fmt.contains("%B")
-        && let Ok(f) = DateTimeFormatter::try_new(locale_prefs, fieldsets::M::long())
-    {
-        fmt = fmt.replace("%B", &f.format(&iso_date).to_string());
-    }
-    if (fmt.contains("%b") || fmt.contains("%h"))
-        && let Ok(f) = DateTimeFormatter::try_new(locale_prefs, fieldsets::M::medium())
-    {
-        // ICU's medium format may include trailing periods (e.g., "febr." for Hungarian),
-        // which when combined with locale format strings that also add periods after
-        // %b (e.g., "%Y. %b. %d") results in double periods ("febr..").
-        // The standard C/POSIX locale via nl_langinfo returns abbreviations
-        // WITHOUT trailing periods, so we strip them here for consistency.
-        let month_abbrev = f.format(&iso_date).to_string();
-        let month_abbrev = month_abbrev.trim_end_matches('.').to_string();
-        fmt = fmt
-            .replace("%b", &month_abbrev)
-            .replace("%h", &month_abbrev);
-    }
-    if fmt.contains("%A")
-        && let Ok(f) = DateTimeFormatter::try_new(locale_prefs, fieldsets::E::long())
-    {
-        fmt = fmt.replace("%A", &f.format(&iso_date).to_string());
-    }
-    if fmt.contains("%a")
-        && let Ok(f) = DateTimeFormatter::try_new(locale_prefs, fieldsets::E::short())
-    {
-        fmt = fmt.replace("%a", &f.format(&iso_date).to_string());
-    }
+        if fmt.contains("%B")
+            && let Some(f) = &formatters.month_long
+        {
+            fmt = fmt.replace("%B", &f.format(&iso_date).to_string());
+        }
+        if (fmt.contains("%b") || fmt.contains("%h"))
+            && let Some(f) = &formatters.month_medium
+        {
+            let month_abbrev = f.format(&iso_date).to_string();
+            let month_abbrev = month_abbrev.trim_end_matches('.');
+            fmt = fmt.replace("%b", month_abbrev).replace("%h", month_abbrev);
+        }
+        if fmt.contains("%A")
+            && let Some(f) = &formatters.weekday_long
+        {
+            fmt = fmt.replace("%A", &f.format(&iso_date).to_string());
+        }
+        if fmt.contains("%a")
+            && let Some(f) = &formatters.weekday_short
+        {
+            fmt = fmt.replace("%a", &f.format(&iso_date).to_string());
+        }
+    });
 
     fmt.replace(PERCENT_PLACEHOLDER, "%%")
 }
